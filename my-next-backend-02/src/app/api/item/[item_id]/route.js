@@ -1,125 +1,72 @@
 import { getClientPromise } from "@/lib/mongodb";
-
+import { verifyJWT } from "@/lib/auth";
+import { recordItemAction } from "@/lib/audit";
 import corsHeaders from "@/lib/cors";
-
 import { errorResponse, printExceptionLog, successResponse } from "@/lib/utils";
-
 import { ObjectId } from "mongodb";
 
 export async function OPTIONS() {
-  return new Response(null, {
-    status: 200,
-    headers: corsHeaders,
-  });
+  return new Response(null, { status: 204, headers: corsHeaders });
+}
+
+function itemDetails(item) {
+  const { name, category, price, amount } = item;
+  return { name, category, price, amount };
 }
 
 export async function GET(request, { params }) {
+  const user = verifyJWT(request);
+  if (!user) return errorResponse("Unauthorized Request", 401);
   const { item_id } = await params;
+  if (!ObjectId.isValid(item_id)) return errorResponse("Invalid item ID", 400);
 
   try {
     const client = await getClientPromise();
-
     const db = client.db(process.env.DB_NAME);
-
-    // Only fetch items that are not deleted
-    const item = await db
-
-      .collection("item")
-
-      .findOne({ _id: new ObjectId(item_id), status: { $ne: "DELETED" } });
-
-    if (item) {
-      return successResponse(
-        {
-          item,
-        },
-
-        201,
-      );
-    } else return errorResponse("Item not found", 404);
+    const item = await db.collection("item").findOne({
+      _id: new ObjectId(item_id), status: { $ne: "DELETED" },
+    });
+    if (!item) return errorResponse("Item not found", 404);
+    await recordItemAction(db, user, "READ_ITEM", item._id, itemDetails(item));
+    return successResponse({ item }, 201);
   } catch (error) {
-    printExceptionLog("GET Item Exception", error);
-
+    printExceptionLog("GET Item", error);
     return errorResponse("GET Item Internal Error", 500);
   }
 }
 
-export async function DELETE(request, { params }) {
+async function changeItem(request, params, deleting) {
+  const user = verifyJWT(request);
+  if (!user) return errorResponse("Unauthorized Request", 401);
   const { item_id } = await params;
-
-  console.log("DELETE request for item_id:", item_id);
+  if (!ObjectId.isValid(item_id)) return errorResponse("Invalid item ID", 400);
 
   try {
+    const data = deleting ? null : await request.json();
     const client = await getClientPromise();
-
     const db = client.db(process.env.DB_NAME);
-
-    // Soft delete: update status to DELETED instead of removing the document
-    const deleteResult = await db
-
-      .collection("item")
-
-      .updateOne(
-        { _id: new ObjectId(item_id) },
-        { $set: { status: "DELETED" } },
-      );
-
-    console.log("Delete result:", deleteResult);
-
-    return successResponse({ message: "Delete Success" }, 201);
+    const found = await client.withSession((session) => session.withTransaction(async () => {
+      const filter = { _id: new ObjectId(item_id), status: { $ne: "DELETED" } };
+      const item = await db.collection("item").findOne(filter, { session });
+      if (!item) return false;
+      const changes = deleting ? { status: "DELETED" } : itemDetails(data);
+      await db.collection("item").updateOne(filter, { $set: changes }, { session });
+      await recordItemAction(db, user, deleting ? "DELETE_ITEM" : "UPDATE_ITEM",
+        item._id, deleting ? itemDetails(item) : changes, session);
+      return true;
+    }));
+    if (!found) return errorResponse("Item not found", 404);
+    return successResponse({ message: deleting ? "Delete Success" : "Item update success" }, 201);
   } catch (error) {
-    printExceptionLog("DELETE Item Exception", error);
-
-    return errorResponse("DELETE Item Internal Error", 500);
+    printExceptionLog(deleting ? "DELETE Item" : "PUT Item", error);
+    return errorResponse("Unable to save item action", 500);
   }
 }
 
+export async function DELETE(request, { params }) {
+  return changeItem(request, params, true);
+}
+
 export async function PUT(request, { params }) {
-  const { item_id } = await params;
-
-  console.log("==>itemd id: ", item_id);
-
-  try {
-    const data = await request.json();
-
-    const client = await getClientPromise();
-
-    const db = client.db(process.env.DB_NAME);
-
-    const storedItem = await db
-
-      .collection("item")
-
-      .findOne({ _id: new ObjectId(item_id), status: { $ne: "DELETED" } });
-
-    if (storedItem) {
-      storedItem.name = data.name;
-
-      storedItem.price = data.price;
-
-      storedItem.amount = data.amount;
-
-      storedItem.category = data.category;
-
-      const updatedResult = await db
-
-        .collection("item")
-
-        .updateOne({ _id: new ObjectId(item_id) }, { $set: storedItem });
-
-      console.log("==>update result: ", updatedResult);
-
-      const updateOk = Number(updatedResult.modifiedCount) > 0;
-
-      if (updateOk)
-        return successResponse({ message: "Item update success" }, 201);
-      else return errorResponse({ message: "Item update failed" }, 400);
-    } else {
-      return errorResponse({ message: "Item not found" }, 400);
-    }
-  } catch (error) {
-    printExceptionLog("PUT Item Exception", error);
-
-    return errorResponse("PUT Item Internal Error", 500);
-  }
+  return changeItem(request, params, false);
 }

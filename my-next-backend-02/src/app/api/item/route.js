@@ -1,4 +1,6 @@
 import { getClientPromise } from "@/lib/mongodb";
+import { verifyJWT } from "@/lib/auth";
+import { recordItemAction } from "@/lib/audit";
 
 import corsHeaders from "@/lib/cors";
 
@@ -12,6 +14,8 @@ export async function OPTIONS() {
 }
 
 export async function GET(request) {
+  const user = verifyJWT(request);
+  if (!user) return errorResponse("Unauthorized Request", 401);
   try {
     const client = await getClientPromise();
 
@@ -24,6 +28,7 @@ export async function GET(request) {
       .find({ status: { $ne: "DELETED" } })
       .toArray();
 
+    await recordItemAction(db, user, "LIST_ITEMS", null, { count: itemList.length });
     return successResponse({ itemList }, 201);
   } catch (error) {
     printExceptionLog("GET Items", error);
@@ -33,6 +38,8 @@ export async function GET(request) {
 }
 
 export async function POST(request) {
+  const user = verifyJWT(request);
+  if (!user) return errorResponse("Unauthorized Request", 401);
   try {
     const data = await request.json();
 
@@ -48,7 +55,7 @@ export async function POST(request) {
 
     const db = client.db(process.env.DB_NAME);
 
-    const insertResult = await db.collection("item").insertOne({
+    const item = {
       name: name,
 
       category: category,
@@ -58,7 +65,17 @@ export async function POST(request) {
       amount: amount,
 
       status: "ACTIVE",
-    });
+    };
+
+    const insertResult = await client.withSession((session) =>
+      session.withTransaction(async () => {
+        const result = await db.collection("item").insertOne(item, { session });
+        const { name, category, price, amount } = item;
+        await recordItemAction(db, user, "CREATE_ITEM", result.insertedId,
+          { name, category, price, amount }, session);
+        return result;
+      }),
+    );
 
     return successResponse(
       {
