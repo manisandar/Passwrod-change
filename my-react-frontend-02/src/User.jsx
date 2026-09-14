@@ -10,6 +10,7 @@ import Snackbar from "@mui/material/Snackbar";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
+import PersonAddIcon from "@mui/icons-material/PersonAdd";
 import { DataGrid } from "@mui/x-data-grid";
 import { Navigate } from "react-router-dom";
 
@@ -27,6 +28,9 @@ export default function User() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addError, setAddError] = useState("");
+  const [isAdding, setIsAdding] = useState(false);
 
   const isAdmin = String(user?.id) === "-1";
 
@@ -62,6 +66,44 @@ export default function User() {
   }, [isAdmin]);
 
   if (!isAdmin) return <Navigate to="/item" replace />;
+
+  const addUser = async (event) => {
+    event.preventDefault();
+    if (isAdding) return;
+    const fields = Object.fromEntries(new FormData(event.currentTarget));
+    const { password: initialPassword, confirmation, ...profile } = fields;
+    for (const key of Object.keys(profile)) profile[key] = profile[key].trim();
+    if (!profile.username || !profile.email) {
+      setAddError("Username and email are required.");
+      return;
+    }
+    if (initialPassword.length < 6 || initialPassword !== confirmation) {
+      setAddError("Use at least 6 characters and make sure both passwords match.");
+      return;
+    }
+    setIsAdding(true);
+    setAddError("");
+    try {
+      const response = await fetch(`${API_URL}/api/user`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...profile, password: initialPassword }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.message ?? (data.errorType === "Duplicate Data"
+          ? `That ${data.errorMsg} is already in use.` : "Unable to add user."));
+      }
+      setUsers((current) => [{ ...profile, _id: data.id }, ...current]);
+      setAddOpen(false);
+      setSuccess(`User ${profile.username} added successfully`);
+    } catch (addFailure) {
+      setAddError(addFailure.message);
+    } finally {
+      setIsAdding(false);
+    }
+  };
 
   const openPasswordDialog = (selectedRow) => {
     setSelectedUser(selectedRow);
@@ -136,12 +178,20 @@ export default function User() {
 
   return (
     <Stack spacing={2}>
-      <div>
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={2} justifyContent="space-between" alignItems={{ sm: "center" }}>
+        <div>
         <Typography variant="h5">User management</Typography>
         <Typography color="text.secondary">
           Select a user to assign a new password.
         </Typography>
-      </div>
+        </div>
+        <Button variant="contained" startIcon={<PersonAddIcon />} onClick={() => {
+          setAddError("");
+          setAddOpen(true);
+        }}>
+          Add User
+        </Button>
+      </Stack>
 
       {error && !selectedUser && <Alert severity="error">{error}</Alert>}
 
@@ -197,6 +247,27 @@ export default function User() {
             {isSaving ? "Saving..." : "Change password"}
           </Button>
         </DialogActions>
+      </Dialog>
+
+      <Dialog open={addOpen} onClose={() => { if (!isAdding) setAddOpen(false); }} fullWidth maxWidth="sm">
+        <form onSubmit={addUser}>
+          <DialogTitle>Add user</DialogTitle>
+          <DialogContent>
+            <Stack spacing={2} sx={{ pt: 1 }}>
+              {addError && <Alert severity="error">{addError}</Alert>}
+              <TextField autoFocus required name="username" label="Username" disabled={isAdding} fullWidth />
+              <TextField required name="email" label="Email" type="email" disabled={isAdding} fullWidth />
+              <TextField name="firstname" label="First name" disabled={isAdding} fullWidth />
+              <TextField name="lastname" label="Last name" disabled={isAdding} fullWidth />
+              <TextField required name="password" label="Password" type="password" autoComplete="new-password" helperText="Use at least 6 characters" disabled={isAdding} fullWidth />
+              <TextField required name="confirmation" label="Confirm password" type="password" autoComplete="new-password" disabled={isAdding} fullWidth />
+            </Stack>
+          </DialogContent>
+          <DialogActions>
+            <Button disabled={isAdding} onClick={() => setAddOpen(false)}>Cancel</Button>
+            <Button type="submit" variant="contained" disabled={isAdding}>{isAdding ? "Adding..." : "Add User"}</Button>
+          </DialogActions>
+        </form>
       </Dialog>
 
       <Snackbar
